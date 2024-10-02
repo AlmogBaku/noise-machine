@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/subtle"
 	"embed"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,10 +48,10 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/start", startHandler)
-	http.HandleFunc("/stop", stopHandler)
-	http.HandleFunc("/volume", updateVolumeHandler)
+	http.HandleFunc("/", authMiddleware(indexHandler))
+	http.HandleFunc("/start", authMiddleware(startHandler))
+	http.HandleFunc("/stop", authMiddleware(stopHandler))
+	http.HandleFunc("/volume", authMiddleware(updateVolumeHandler))
 	http.Handle("/icon.png", http.FileServer(http.FS(icon)))
 
 	// Setting up signal capturing
@@ -65,6 +67,46 @@ func main() {
 
 	fmt.Println("Server running on port 8888")
 	http.ListenAndServe(":8888", nil)
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requiresAuth(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		username := os.Getenv("AUTH_USER")
+		password := os.Getenv("AUTH_PASSWORD")
+		if username == "" || password == "" {
+			fmt.Println("External access is blocked because AUTH_USER and AUTH_PASSWORD are not set.")
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		recvUser, recvPass, ok := r.BasicAuth()
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(recvUser), []byte(username)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(recvPass), []byte(password)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func requiresAuth(r *http.Request) bool {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return true
+	}
+	userIP := net.ParseIP(ip)
+	if userIP == nil {
+		return true
+	}
+
+	return !userIP.IsPrivate() && userIP.IsGlobalUnicast()
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
